@@ -1,0 +1,434 @@
+---
+title: "Alligator food choice"
+author: "Priyansh Tyagi-202007480"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(vcdExtra)
+library(tidyr)
+library(dplyr)
+library(nnet)
+library(car)
+library(ggplot2)
+library(dplyr)
+```
+
+### 1. Introduction
+
+This study analyzes the dietary habits of alligators in Florida, based on a classic dataset from a study by the Florida Game and Fresh Water Fish Commission. The data, originally presented in Table 8.1 of Dr. Alan Agresti’s *Categorical Data Analysis*, provides a unique opportunity to examine predatory behavior through the lens of **Multinomial Logistic Regression**.
+
+#### **The Biological Context**  
+In the wild, an alligator's primary food source is not constant; it is influenced by the environment in which the alligator lives and its own physical development. This study tracks the stomach contents of **219 alligators** captured across four distinct Florida lakes: **George, Hancock, Oklawaha, and Trafford**. The stomach contents were classified into five primary categories:
+
+* **Fish** (The baseline dietary staple)
+* **Invertebrates** (Snails, insects, etc.)
+* **Reptiles** (Turtles and smaller alligators)
+* **Birds**
+* **Other** (Amphibians, mammals, and miscellaneous plant material)
+
+#### **Purpose of the Study**
+The primary objective of this analysis is to model the relationship between an alligator’s primary food choice (the nominal response variable) and two key predictors:
+
+1.  **Lake (Geographical Location):** Does the availability of prey in different ecosystems significantly shift the dietary preference?
+2.  **Size (Biological Maturity):** Do "Small" alligators ($\le 2.3$ meters) hunt different prey than "Large" alligators ($> 2.3$ meters) due to changes in jaw strength and swimming capacity?
+3.  **Gender:** Does the sex of the alligator influence dietary choice? We investigate if physiological differences or reproductive energy requirements between males and females lead to different prey selection.
+
+By utilizing a multinomial logit framework, we aim to determine the probability that an alligator belongs to one of the five dietary categories based on its location and size. This allows ecologists to quantify the **odds** of dietary shifts, for example, measuring how much more likely a large alligator is to prefer fish over invertebrates compared to a small alligator.
+
+
+### 2. Description of Variables
+
+The dataset used in this study consists of 219 observations of Florida alligators. To ensure a robust analysis, the data is categorized into a primary nominal response and two main categorical predictors.
+
+#### **The Response Variable**
+* **food ($y$):** This is a nominal categorical variable representing the primary stomach contents of the alligator. It consists of five unordered levels:
+    * **fish** (The chosen baseline/reference category)
+    * **invertebrate** (e.g., snails, insects, crustaceans)
+    * **reptile** (e.g., turtles, smaller alligators)
+    * **bird**
+    * **other** (e.g., amphibians, mammals, plant material)
+
+#### **Explanatory Variables (Predictors)**
+* **lake ($x_1$):** A categorical factor representing the four specific locations of capture: **George, Hancock, Oklawaha, and Trafford**.
+* **size ($x_2$):** A categorical factor representing physical maturity, divided into:
+    * **small** ($\leq 2.3$ meters in length)
+    * **large** ($> 2.3$ meters in length)  
+* **sex ($x_3$):** A categorical factor representing the gender of the alligator: **Male or Female**
+
+#### **Summary Table of Variables**
+
+| Variable | Role | Type | Levels |
+| :--- | :--- | :--- | :--- |
+| **food** | Response | Nominal | 5 (Fish, Invert, Reptile, Bird, Other) |
+| **lake** | Predictor | Factor | 4 (George, Hancock, Oklawaha, Trafford) |
+| **size** | Predictor | Factor | 2 (Small, Large) |
+| **sex** | Predictor | Factor | 2 (Male, Female) |
+
+We will check which has the least AIC and drop or keep the variables.
+
+<br>
+
+#### **Data Import and Preparation**
+
+The data is imported from the `vcdExtra` library. We transform the data into "long" format so that each row represents a single alligator, which is the required structure for individual-level modeling and diagnostics.
+
+
+```{r echo=FALSE}
+
+data("Alligator", package = "vcdExtra")
+alligator_data <- Alligator %>%
+  uncount(count)
+
+alligator_data$food <- relevel(as.factor(alligator_data$food), ref = "fish")
+alligator_data$lake <- as.factor(alligator_data$lake)
+alligator_data$size <- factor(alligator_data$size, levels = c("small", "large"))
+alligator_data$sex <- as.factor(alligator_data$sex)
+alligator_data$sex <- relevel(alligator_data$sex, ref = "female")
+
+summary(alligator_data)
+```
+```{r echo=FALSE}
+
+ggplot(alligator_data, aes(x = food, fill = food)) +
+  geom_bar() +
+  facet_wrap(~lake) +
+  theme_minimal() +
+  labs(title = "Observed Frequency of Food Choices by Lake",
+       x = "Primary Food Choice",
+       y = "Number of Alligators") +
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+#### **EDA Insights**
+
+* **Dominance of Fish:** In Lake George and Lake Hancock, **fish** is the most frequent observation. This widespread prevalence across the sample justifies its selection as the baseline reference category for our multinomial model.
+* **Data Sparsity:** There are very few observations for "Bird" across all lakes and almost no "Reptile" observations in Lake George. This **sparsity** explains why formal Goodness-of-Fit tests (like the Deviance test) may yield a $p$-value of 0.
+* **Geographical Variation:** Visual inspection shows clear dietary shifts between locations. For instance, **Lake Hancock** shows a notably high count of "Other" food sources, while **Lake Trafford** and **Lake Oklawaha** show a much higher relative frequency of invertebrates compared to Lake George.
+
+### 3. Model Setup and Assumptions
+
+To analyze the dietary preferences of alligators, we utilize a **Multinomial Logistic Regression Model** (also known as a Baseline-Category Logit Model). This model is specifically designed for situations where the response variable is nominal and contains more than two unordered categories.
+
+#### **The Model Equation**
+Let $J = 5$ represent the total number of food categories. We choose **fish** ($j=1$) as the baseline category. The model fits $J - 1$ (four) separate logit equations simultaneously. Each equation describes the log-odds of an alligator choosing a specific food type $j$ relative to the baseline (fish) based on the predictors **Lake** and **Size**:
+
+$$\log\left(\frac{\pi_j}{\pi_1}\right) = \beta_{0j} + \beta_{1j}(\text{lake}) + \beta_{2j}(\text{size})$$
+
+for $j = 2, 3, 4, 5$.  
+(We will se later why Sex is not included in the model)  
+
+In this framework, the equations specifically model the log-odds of choosing:  
+1.  **Invertebrates** vs. **Fish**  
+2.  **Reptiles** vs. **Fish**  
+3.  **Birds** vs. **Fish**  
+4.  **Other** vs. **Fish**  
+
+The probability for any specific category $j$ can be recovered using the following calculation:
+$$\pi_j = \frac{\exp(\beta_{0j} + \beta_{1j}x_1 + \beta_{2j}x_2)}{1 + \sum_{k=2}^{J} \exp(\beta_{0k} + \beta_{1k}x_1 + \beta_{2k}x_2)}$$
+
+#### **Model Assumptions**
+For the multinomial logistic regression results to be valid, the following statistical assumptions must be met:
+
+* **Nominal Response:** The dependent variable must be categorical and unordered. In this study, dietary choices (Fish, Invertebrate, etc.) satisfy this requirement.
+* **Independence of Irrelevant Alternatives:** This assumption states that the relative odds of choosing between two specific categories (e.g., Fish vs. Bird) are unaffected by the presence or absence of other categories (e.g., Reptile).
+* **Independence of Observations:** The dietary choice of one alligator is assumed to be independent of the dietary choice of any other alligator in the sample.
+* **Absence of Multicollinearity:** The explanatory variables, **Lake** and **Size**, should not be perfectly correlated.
+* **Large Sample Size:** Multinomial models require a sufficient number of observations across all combinations of categories to ensure stable Maximum Likelihood Estimates (MLE).
+
+
+### 4. Model Selection and Diagnostics
+
+The objective of model selection in multinomial regression is to identify a model that balances fit with simplicity. We evaluated four candidate models using the **Akaike Information Criterion (AIC)** and **Residual Deviance**:
+1. **The Null Model:** Includes only the intercept.  
+2. **The Additive Model:** Includes the main effects of **Lake** and **Size**.  
+3. **The Interaction Model:** Includes main effects plus the interaction term (**Lake * Size**).  
+4. **The Additive Model:** Includes the main effects of **Lake**, **Sex** and **Size**.
+
+```{r echo=FALSE}
+
+model_null <- multinom(food ~ 1, data = alligator_data, trace = FALSE)
+model_add <- multinom(food ~ lake + size, data = alligator_data, trace = FALSE)
+model_int <- multinom(food ~ lake * size, data = alligator_data, trace = FALSE)
+model_sex <- multinom(food ~ lake + size + sex, data = alligator_data, trace = FALSE)
+aic_table <- data.frame(
+  Model = c("Null", "Additive (Lake + Size)", "Interaction (Lake * Size)", "Additive + Sex (Lake + Size + Sex)"),
+  AIC = c(AIC(model_null), AIC(model_add), AIC(model_int), AIC(model_sex)),
+  Deviance = c(model_null$deviance, model_add$deviance, model_int$deviance,model_sex$deviance )
+)
+print(aic_table)
+
+```
+
+#### **Interpretation of Model Selection**
+
+Based on the statistical output, the Additive Model (Lake + Size) is the preferred choice for this analysis. Although we investigated the inclusion of Sex as a third predictor, the AIC rose from 580.08 to 585.87 when sex was added. This increase in AIC indicates that adding gender information introduces more complexity than predictive value. Consequently, we conclude that dietary drivers in this population are gender-neutral, and we proceed with the more parsimonious Lake + Size model for final interpretation .
+
+#### **Significance of Predictors**
+
+To verify that both predictors contribute meaningfully to the dietary predictions, we performed Type II Likelihood Ratio Tests.
+
+```{r}
+
+Anova(model_add)
+
+```
+
+#### **Diagnostic Summary**
+
+1. **Lake:** The extremely low $p$-value confirms that geographical location is a primary driver of food choice.
+2. **Size:** The significant $p$-value confirms that biological maturity (length) plays a critical role in the type of prey an alligator successfully hunts.
+
+
+
+### 5. Final Model, Fitted Probabilities and Plot of the Fit
+
+With the additive multinomial model selected, we now evaluate its performance and predictive accuracy. The final model utilizes the coefficients for **Lake** and **Size** to estimate the probabilities of an alligator selecting each of the five dietary categories.
+
+#### **Likelihood Ratio Test Results**
+The Analysis of Deviance (Type II tests) confirms that both predictors are highly significant contributors to the model's explanatory power:
+
+* **Lake:** $\chi^2 = 49.13, df = 12, p < 0.001$
+* **Size:** $\chi^2 = 21.09, df = 4, p < 0.001$
+
+These results allow us to reject the null hypotheses of independence, concluding that an alligator's primary food choice is significantly dependent on both its geographical location and its physical maturity.
+
+
+#### Goodness-of-Fit Test using Residual Deviance
+
+```{r echo=FALSE}
+gof_stat <- as.numeric(deviance(model_add))
+cov_patterns <- nlevels(alligator_data$lake) * nlevels(alligator_data$size)
+
+J <- nlevels(alligator_data$food)
+cells <- cov_patterns * J
+n_par <- length(coef(model_add))
+df_gof <- cells - cov_patterns - n_par
+p_value_gof <- 1 - pchisq(gof_stat, df_gof)
+
+cat("Residual Deviance:", round(gof_stat, 2), "\n")
+cat("Degrees of Freedom:", df_gof, "\n")
+cat("p-value:", signif(p_value_gof, 4), "\n")
+```
+
+
+The formal Deviance Goodness-of-Fit test yielded a $p \approx 0$, which under standard conditions would suggest a poor fit. However, in multinomial modeling with many categories, this result is often an artifact of data sparsity. With 5 response levels and 8 covariate patterns, many 'cells' in our contingency table have expected frequencies much lower than the required threshold of 5. When the average cell count is low, the $\chi^2$ distribution becomes a poor approximation, often resulting in an artificially inflated Deviance statistic. Therefore, we rely on Pseudo-$R^2$ and Residual Analysis as more reliable indicators of fit for this specific dataset.
+
+
+#### **Visualization of the Fit (Predicted Probabilities)**
+To interpret the practical impact of these predictors, we generate an **Effect Plot**. This visualization displays the predicted probability distribution of food choices across the different levels of Lake and Size.
+
+
+```{r echo=FALSE}
+dummy_data <- expand.grid(
+  lake = levels(alligator_data$lake),
+  size = levels(alligator_data$size))
+preds <- predict(model_add, newdata = dummy_data, type = "probs")
+plot_data <- cbind(dummy_data, preds)
+
+
+plot_data_long <- plot_data %>%
+  tidyr::pivot_longer(cols = c(fish, bird, invert, other, reptile), 
+                      names_to = "Food_Choice", values_to = "Probability")
+ggplot(plot_data_long, aes(x = size, y = Probability, fill = Food_Choice)) +
+  geom_bar(stat = "identity", position = "fill") +
+  facet_wrap(~lake) +
+  scale_fill_brewer(palette = "Set3") +
+  labs(title = "Predicted Probabilities of Alligator Food Choice by Lake and Size",
+       x = "Alligator Size",
+       y = "Predicted Probability",
+       fill = "Primary Food") +
+  theme_minimal()
+
+```
+
+
+
+
+
+#### **Predictive Performance**
+
+```{r echo=FALSE}
+ll_null <- logLik(model_null)
+ll_model <- logLik(model_add)
+
+pseudo_r2 <- as.numeric(1 - (ll_model / ll_null))
+cat("McFadden's Pseudo R-squared:", round(pseudo_r2, 4))
+
+predicted_food <- predict(model_add)
+accuracy <- mean(predicted_food == alligator_data$food)
+cat("Model Classification Accuracy:", round(accuracy * 100, 2), "%")
+```
+
+#### **Residual Analysis**
+```{r echo=FALSE, fig.height=4, fig.width=6}
+resids <- residuals(model_add, type = "response")
+
+hist(resids, breaks = 20, main = "Distribution of Residuals", 
+     xlab = "Residual Value", col = "lightblue", border = "white")
+
+
+fitted_values <- predict(model_add, type = "probs")
+resids_raw <- residuals(model_add, type = "response")
+
+plot(fitted_values[, "fish"], resids_raw[, "fish"],
+     main = "Deviance Residuals vs. Fitted (Category: Fish)",
+     xlab = "Predicted Probabilities", ylab = "Residuals",
+     pch = 20, col = rgb(0, 0, 1, 0.5))
+abline(h = 0, lty = 2, col = "red")
+```
+
+The histogram shows a strong central peak at **0.0**, indicating that the model's predicted probabilities align well with the observed dietary choices for the majority of the sample. While there are some smaller clusters of higher residuals (near 0.5 and 1.0), these represent the **"sparse"** categories (such as "Bird" or "Reptile") where the model has less data to work with. 
+
+Overall, the lack of heavy skewness or extreme isolated outliers suggests that the model captures the main structure of the data, although deviations remain due to sparse categories. The concentration of residuals at zero suggests that the inclusion of **Lake** and **Size** as predictors significantly improves the model's ability to estimate the true dietary proportions of the Florida alligator population.
+
+#### **Predictive Power and Model Validity**
+
+In addition to formal hypothesis testing, we evaluate the model's practical utility through its predictive power and the proportion of variance explained.
+
+* **McFadden’s Pseudo-$R^2$:** Our model achieved a value of **0.1064**. In the context of multinomial ecological data—where individual animal behavior is highly variable—a Pseudo-$R^2$ above 0.10 indicates that the predictors (Lake and Size) provide a significant and meaningful improvement over the null model in explaining dietary choice.
+* **Classification Accuracy:** The model correctly predicts the primary food choice of an alligator **48.4%** of the time. 
+
+**Diagnostic Conclusion:**
+While a binary model might seek higher accuracy, a **48.4% accuracy rate** is impressive for a response variable with **five nominal categories**. In a purely random scenario, one would expect an accuracy of only 20%. Our model effectively more than doubles the predictive success rate, proving that **Lake** and **Size** are robust ecological indicators. 
+
+The visual evidence from the **Plot of the Fit** further confirms that the model successfully captures the primary dietary shifts.the model is useful for identifying the main effects of lake and size, although it does not provide an exact fit to the data.
+
+
+### 6. Interpret the Outcome
+
+
+```{r echo=FALSE}
+exp_coeffs <- exp(coef(model_add))
+size_effects <- exp_coeffs[, "sizelarge"]
+print(size_effects)
+
+```
+
+#### **Statistical Interpretation**
+
+The quantitative results provide a definitive measure of the **Ontogenetic Shift** (the effect of size) across all lakes. By examining the Odds Ratios (OR) for the `sizelarge` coefficient, we can quantify how dietary preference changes as the alligators mature:
+
+* **Invertebrates (OR = 0.23):** This is the most significant finding. The odds of a large alligator choosing invertebrates over fish are only **0.23 times** (or $77\%$ lower than) the odds for a small alligator. This confirms that as alligators grow, they drastically move away from eating small prey like insects and snails.Conversely, taking the reciprocal ($1 / 0.23 \approx 4.35$), we can say a large alligator is roughly 4.3 times more likely to prefer Fish over Invertebrates compared to a small alligator.
+* **Other (OR = 0.72):** Large alligators also have lower odds ($28\%$ lower) of choosing the "Other" food category compared to fish, relative to small alligators.
+* **Reptiles (OR = 1.42) and Birds (OR = 1.88):** Interestingly, the odds ratios for reptiles and birds are both **greater than 1**. This indicates that large alligators have $42\%$ higher odds of choosing reptiles and $88\%$ higher odds of choosing birds over fish compared to their smaller counterparts.
+
+**Conclusion of Findings:** These values confirm that while the "Fish" baseline remains a staple, the alligator diet expands toward larger vertebrates (birds and reptiles) and shifts away from the "starter" diet of invertebrates as the animals reach biological maturity. It is worth noting that while sexual dimorphism exists in many reptiles, our modeling confirms that for Florida alligators, habitat and maturity are the overwhelming drivers of diet. The insignificant impact of the Sex variable suggests that males and females of the same size in the same lake face identical ecological pressures and hunting opportunities .
+
+### 7. Concluding Remarks
+
+This analysis demonstrates that alligator dietary habits are not random but are strictly governed by geographical habitat and biological development. Using a multinomial logistic regression framework, we successfully quantified the **ontogenetic shift** that occurs in *Alligators*.
+
+The transition from a high-probability invertebrate diet in small alligators to a vertebrate-heavy diet (fish, reptiles, and birds) in large alligators is statistically significant ($p < 0.001$). While the **Goodness-of-Fit test** yielded a $p$-value of approximately 0, we conclude this is a result of **sparse data** in certain food categories (the presence of "empty cells") rather than a failure of the model logic. 
+
+In summary, the additive model provides a highly parsimonious and ecologically sound description of the data, proving that **Size** and **Location** are the dual engines driving predatory behavior in Florida’s lake ecosystems.
+
+\newpage
+
+
+### 8. References
+
+* Agresti, A. (2019). *An Introduction to Categorical Data Analysis* (3rd ed.). Wiley.
+* Florida Game and Fresh Water Fish Commission. Alligator dietary dataset (Table 8.1).
+* Friendly, M. (2024). *vcdExtra: Visualizing Categorical Data Extended*. R package version 0.8-5.
+
+\newpage
+
+### 9. Appendix
+
+```{r,eval=FALSE }
+library(vcdExtra)
+library(tidyr)
+library(dplyr)
+library(nnet)
+library(car)
+library(ggplot2)
+
+data("Alligator", package = "vcdExtra")
+alligator_data <- Alligator %>%
+  uncount(count)
+
+alligator_data$food <- relevel(as.factor(alligator_data$food), ref = "fish")
+alligator_data$lake <- as.factor(alligator_data$lake)
+alligator_data$size <- factor(alligator_data$size, levels = c("small", "large"))
+
+summary(alligator_data)
+
+ggplot(alligator_data, aes(x = food, fill = food)) +
+  geom_bar() +
+  facet_wrap(~lake) +
+  theme_minimal() +
+  labs(title = "Observed Frequency of Food Choices by Lake",
+       x = "Primary Food Choice",
+       y = "Number of Alligators") +
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+model_null <- multinom(food ~ 1, data = alligator_data, trace = FALSE)
+model_add <- multinom(food ~ lake + size, data = alligator_data, trace = FALSE)
+model_int <- multinom(food ~ lake * size, data = alligator_data, trace = FALSE)
+
+aic_table <- data.frame(
+  Model = c("Null", "Additive (Lake + Size)", "Interaction (Lake * Size)"),
+  AIC = c(AIC(model_null), AIC(model_add), AIC(model_int)),
+  Deviance = c(model_null$deviance, model_add$deviance, model_int$deviance)
+)
+print(aic_table)
+
+Anova(model_add)
+
+gof_stat <- as.numeric(deviance(model_add))
+cov_patterns <- nlevels(alligator_data$lake) * nlevels(alligator_data$size)
+J <- nlevels(alligator_data$food)
+cells <- cov_patterns * J
+n_par <- length(coef(model_add))
+df_gof <- cells - cov_patterns - n_par
+p_value_gof <- 1 - pchisq(gof_stat, df_gof)
+
+cat("Residual Deviance:", round(gof_stat, 2), "\n")
+cat("Degrees of Freedom:", df_gof, "\n")
+cat("p-value:", signif(p_value_gof, 4), "\n")
+
+dummy_data <- expand.grid(
+  lake = levels(alligator_data$lake),
+  size = levels(alligator_data$size)
+)
+preds <- predict(model_add, newdata = dummy_data, type = "probs")
+plot_data <- cbind(dummy_data, preds)
+plot_data_long <- plot_data %>%
+  tidyr::pivot_longer(cols = c(fish, bird, invert, other, reptile), 
+                      names_to = "Food_Choice", values_to = "Probability")
+
+ggplot(plot_data_long, aes(x = size, y = Probability, fill = Food_Choice)) +
+  geom_bar(stat = "identity", position = "fill") +
+  facet_wrap(~lake) +
+  scale_fill_brewer(palette = "Set3") +
+  labs(title = "Predicted Probabilities of Alligator Food Choice by Lake and Size",
+       x = "Alligator Size",
+       y = "Predicted Probability",
+       fill = "Primary Food") +
+  theme_minimal()
+
+ll_null <- logLik(model_null)
+ll_model <- logLik(model_add)
+pseudo_r2 <- as.numeric(1 - (ll_model / ll_null))
+cat("McFadden's Pseudo R-squared:", round(pseudo_r2, 4))
+
+predicted_food <- predict(model_add)
+accuracy <- mean(predicted_food == alligator_data$food)
+cat("Model Classification Accuracy:", round(accuracy * 100, 2), "%")
+
+resids <- residuals(model_add, type = "response")
+hist(resids, breaks = 20, main = "Distribution of Residuals", 
+     xlab = "Residual Value", col = "lightblue", border = "white")
+
+exp_coeffs <- exp(coef(model_add))
+size_effects <- exp_coeffs[, "sizelarge"]
+print(size_effects)
+```
